@@ -39,14 +39,60 @@ def init():
     click.echo(f"Memory vault initialized at {home}")
 
 
-@main.command()
-def config():
-    """Show effective configuration."""
+@main.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx):
+    """Show or manage configuration."""
+    if ctx.invoked_subcommand is None:
+        home = get_memory_home()
+        cfg = load_config(os.path.join(home, "config.yaml"))
+        data = _redact_api_keys(asdict(cfg))
+        data["memory_home"] = home
+        click.echo(yaml.safe_dump(data, sort_keys=False))
+
+
+_CONFIG_TEMPLATE = """\
+# EchoVault configuration
+# Docs: https://github.com/mraza007/echovault#configure-embeddings-optional
+
+# Embedding provider for semantic search.
+# Without this, keyword search (FTS5) still works.
+embedding:
+  provider: ollama              # ollama | openai | openrouter
+  model: nomic-embed-text
+  # api_key: sk-...            # required for openai / openrouter
+
+# Optional LLM enrichment (auto-tags, better summaries).
+# Set to "none" to skip.
+enrichment:
+  provider: none                # none | ollama | openai | openrouter
+
+# How memories are retrieved at session start.
+# "auto" uses vectors when available, falls back to keywords.
+context:
+  semantic: auto                # auto | always | never
+  topup_recent: true            # also include recent memories
+"""
+
+
+@config.command("init")
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing config")
+def config_init(force):
+    """Generate a starter config.yaml."""
     home = get_memory_home()
-    cfg = load_config(os.path.join(home, "config.yaml"))
-    data = _redact_api_keys(asdict(cfg))
-    data["memory_home"] = home
-    click.echo(yaml.safe_dump(data, sort_keys=False))
+    config_path = os.path.join(home, "config.yaml")
+
+    if os.path.exists(config_path) and not force:
+        click.echo(f"Config already exists at {config_path}")
+        click.echo("Use --force to overwrite.")
+        return
+
+    os.makedirs(home, exist_ok=True)
+    with open(config_path, "w") as f:
+        f.write(_CONFIG_TEMPLATE)
+
+    click.echo(f"Created {config_path}")
+    click.echo("Edit the file to configure your embedding provider.")
 
 
 @main.command()
@@ -332,6 +378,105 @@ def sessions(limit, project):
     for proj, fname in session_files[:limit]:
         date_str = fname.replace("-session.md", "")
         click.echo(f"  {date_str} | {proj}")
+
+
+def _resolve_config_dir(agent_dot_dir: str, config_dir: str | None, project: bool) -> str:
+    """Resolve the config directory for an agent.
+
+    Args:
+        agent_dot_dir: The dot-directory name (e.g. ".claude", ".cursor", ".codex").
+        config_dir: Explicit --config-dir override (takes priority).
+        project: If True, use cwd; if False, use home directory.
+    """
+    if config_dir:
+        return config_dir
+    if project:
+        return os.path.join(os.getcwd(), agent_dot_dir)
+    return os.path.join(os.path.expanduser("~"), agent_dot_dir)
+
+
+@main.group()
+def setup():
+    """Install EchoVault hooks for an agent."""
+    pass
+
+
+@setup.command("claude-code")
+@click.option("--config-dir", default=None, help="Path to .claude directory")
+@click.option("--project", is_flag=True, default=False, help="Install in current project instead of globally")
+def setup_claude_code_cmd(config_dir, project):
+    """Install hooks into Claude Code settings."""
+    from memory.setup import setup_claude_code
+
+    target = _resolve_config_dir(".claude", config_dir, project)
+    result = setup_claude_code(target)
+    click.echo(result["message"])
+
+
+@setup.command("cursor")
+@click.option("--config-dir", default=None, help="Path to .cursor directory")
+@click.option("--project", is_flag=True, default=False, help="Install in current project instead of globally")
+def setup_cursor_cmd(config_dir, project):
+    """Install hooks into Cursor hooks.json."""
+    from memory.setup import setup_cursor
+
+    target = _resolve_config_dir(".cursor", config_dir, project)
+    result = setup_cursor(target)
+    click.echo(result["message"])
+
+
+@setup.command("codex")
+@click.option("--config-dir", default=None, help="Path to .codex directory")
+@click.option("--project", is_flag=True, default=False, help="Install in current project instead of globally")
+def setup_codex_cmd(config_dir, project):
+    """Install EchoVault section into Codex AGENTS.md."""
+    from memory.setup import setup_codex
+
+    target = _resolve_config_dir(".codex", config_dir, project)
+    result = setup_codex(target)
+    click.echo(result["message"])
+
+
+@main.group()
+def uninstall():
+    """Remove EchoVault hooks for an agent."""
+    pass
+
+
+@uninstall.command("claude-code")
+@click.option("--config-dir", default=None, help="Path to .claude directory")
+@click.option("--project", is_flag=True, default=False, help="Uninstall from current project instead of globally")
+def uninstall_claude_code_cmd(config_dir, project):
+    """Remove hooks from Claude Code settings."""
+    from memory.setup import uninstall_claude_code
+
+    target = _resolve_config_dir(".claude", config_dir, project)
+    result = uninstall_claude_code(target)
+    click.echo(result["message"])
+
+
+@uninstall.command("cursor")
+@click.option("--config-dir", default=None, help="Path to .cursor directory")
+@click.option("--project", is_flag=True, default=False, help="Uninstall from current project instead of globally")
+def uninstall_cursor_cmd(config_dir, project):
+    """Remove hooks from Cursor hooks.json."""
+    from memory.setup import uninstall_cursor
+
+    target = _resolve_config_dir(".cursor", config_dir, project)
+    result = uninstall_cursor(target)
+    click.echo(result["message"])
+
+
+@uninstall.command("codex")
+@click.option("--config-dir", default=None, help="Path to .codex directory")
+@click.option("--project", is_flag=True, default=False, help="Uninstall from current project instead of globally")
+def uninstall_codex_cmd(config_dir, project):
+    """Remove EchoVault section from Codex AGENTS.md."""
+    from memory.setup import uninstall_codex
+
+    target = _resolve_config_dir(".codex", config_dir, project)
+    result = uninstall_codex(target)
+    click.echo(result["message"])
 
 
 if __name__ == "__main__":

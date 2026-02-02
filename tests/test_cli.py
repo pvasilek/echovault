@@ -736,3 +736,119 @@ def test_cli_help_shows_reindex(env_home):
 
     assert result.exit_code == 0
     assert "reindex" in result.output
+
+
+# --- setup command tests ---
+
+
+def test_setup_help_shows_agents(env_home):
+    """Test that memory setup --help lists agent subcommands."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "--help"])
+
+    assert result.exit_code == 0
+    assert "claude-code" in result.output
+    assert "cursor" in result.output
+    assert "codex" in result.output
+
+
+def test_setup_claude_code_creates_hooks(env_home, tmp_path):
+    """Test that memory setup claude-code installs hooks."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "claude-code", "--config-dir", str(claude_dir)])
+
+    assert result.exit_code == 0
+    assert "Installed" in result.output or "already" in result.output.lower()
+
+
+def test_setup_cursor_creates_hooks(env_home, tmp_path):
+    """Test that memory setup cursor installs hooks."""
+    cursor_dir = tmp_path / ".cursor"
+    cursor_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "cursor", "--config-dir", str(cursor_dir)])
+
+    assert result.exit_code == 0
+
+
+def test_setup_codex_creates_agents_md(env_home, tmp_path):
+    """Test that memory setup codex writes AGENTS.md."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "codex", "--config-dir", str(codex_dir)])
+
+    assert result.exit_code == 0
+    assert (codex_dir / "AGENTS.md").exists()
+
+
+# --- uninstall command tests ---
+
+
+def test_uninstall_claude_code(env_home, tmp_path):
+    """Test that memory uninstall claude-code removes hooks."""
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+
+    runner = CliRunner()
+    runner.invoke(main, ["setup", "claude-code", "--config-dir", str(claude_dir)])
+    result = runner.invoke(main, ["uninstall", "claude-code", "--config-dir", str(claude_dir)])
+
+    assert result.exit_code == 0
+    assert "Removed" in result.output or "No" in result.output
+
+
+# --- --project flag tests ---
+
+
+def test_setup_claude_code_project_flag(env_home, tmp_path, monkeypatch):
+    """Test that --project installs into .claude in cwd."""
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "claude-code", "--project"])
+
+    assert result.exit_code == 0
+    settings_path = tmp_path / ".claude" / "settings.json"
+    assert settings_path.exists()
+
+
+def test_setup_cursor_project_flag(env_home, tmp_path, monkeypatch):
+    """Test that --project installs into .cursor in cwd."""
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "cursor", "--project"])
+
+    assert result.exit_code == 0
+    hooks_path = tmp_path / ".cursor" / "hooks.json"
+    assert hooks_path.exists()
+
+
+def test_setup_codex_project_flag(env_home, tmp_path, monkeypatch):
+    """Test that --project installs into .codex in cwd."""
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["setup", "codex", "--project"])
+
+    assert result.exit_code == 0
+    agents_path = tmp_path / ".codex" / "AGENTS.md"
+    assert agents_path.exists()
+
+
+def test_uninstall_claude_code_project_flag(env_home, tmp_path, monkeypatch):
+    """Test that --project uninstalls from .claude in cwd."""
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    runner.invoke(main, ["setup", "claude-code", "--project"])
+    result = runner.invoke(main, ["uninstall", "claude-code", "--project"])
+
+    assert result.exit_code == 0
+    assert "Removed" in result.output
