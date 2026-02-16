@@ -378,3 +378,67 @@ def test_list_all_for_reindex(db):
     assert len(memories) == 3
     assert all("rowid" in m for m in memories)
     assert all("title" in m for m in memories)
+
+
+def test_updated_count_defaults_to_zero(db, sample_memory):
+    """Test that new memories have updated_count = 0."""
+    db.insert_memory(sample_memory)
+    result = db.get_memory(sample_memory.id)
+    assert result["updated_count"] == 0
+
+
+def test_update_memory_replaces_fields_and_increments_count(db):
+    """Test that update_memory replaces fields and increments updated_count."""
+    raw = RawMemoryInput(
+        title="Original Title",
+        what="Original what",
+        why="Original why",
+        impact="Original impact",
+        tags=["tag1"],
+        category="decision",
+    )
+    mem = Memory.from_raw(raw, project="test", file_path="test.md")
+    db.insert_memory(mem)
+
+    updated = db.update_memory(
+        mem.id,
+        what="Updated what",
+        why="Updated why",
+        impact="Updated impact",
+        tags=["tag1", "tag2"],
+        details_append="--- 2026-02-16 ---\nNew details here",
+    )
+    assert updated is True
+
+    result = db.get_memory(mem.id)
+    assert result["what"] == "Updated what"
+    assert result["why"] == "Updated why"
+    assert result["impact"] == "Updated impact"
+    assert result["updated_count"] == 1
+    assert json.loads(result["tags"]) == ["tag1", "tag2"]
+
+
+def test_update_memory_appends_details(db):
+    """Test that update_memory appends to existing details."""
+    raw = RawMemoryInput(
+        title="Memory with Details",
+        what="Has details",
+        category="bug",
+    )
+    mem = Memory.from_raw(raw, project="test", file_path="test.md")
+    db.insert_memory(mem, details="Original details")
+
+    db.update_memory(
+        mem.id,
+        details_append="--- 2026-02-16 ---\nAppended details",
+    )
+
+    detail = db.get_details(mem.id)
+    assert "Original details" in detail.body
+    assert "Appended details" in detail.body
+
+
+def test_update_memory_returns_false_for_nonexistent(db):
+    """Test that update_memory returns False for unknown IDs."""
+    result = db.update_memory("nonexistent-id", what="new")
+    assert result is False

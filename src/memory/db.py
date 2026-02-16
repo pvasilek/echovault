@@ -94,6 +94,22 @@ class MemoryDB:
             END
         """)
 
+        # FTS5 auto-sync trigger for UPDATE
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(memories_fts, rowid, title, what, why, impact, tags, category, project, source)
+                VALUES ('delete', old.rowid, old.title, old.what, old.why, old.impact, old.tags, old.category, old.project, old.source);
+                INSERT INTO memories_fts(rowid, title, what, why, impact, tags, category, project, source)
+                VALUES (new.rowid, new.title, new.what, new.why, new.impact, new.tags, new.category, new.project, new.source);
+            END
+        """)
+
+        # Migration: add updated_count column if missing
+        cursor.execute("PRAGMA table_info(memories)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "updated_count" not in columns:
+            cursor.execute("ALTER TABLE memories ADD COLUMN updated_count INTEGER DEFAULT 0")
+
         # Create vec table if dimension is already known (e.g. reopening existing DB)
         dim = self.get_embedding_dim()
         if dim is not None:
@@ -267,6 +283,72 @@ class MemoryDB:
         if row:
             return MemoryDetail(memory_id=row["memory_id"], body=row["body"])
         return None
+
+    def update_memory(
+        self,
+        memory_id: str,
+        what: str | None = None,
+        why: str | None = None,
+        impact: str | None = None,
+        tags: list[str] | None = None,
+        details_append: str | None = None,
+    ) -> bool:
+        """Update an existing memory's fields and increment updated_count.
+
+        Args:
+            memory_id: Full UUID or prefix of the memory to update
+            what: New what text (replaces existing)
+            why: New why text (replaces existing)
+            impact: New impact text (replaces existing)
+            tags: New tag list (replaces existing)
+            details_append: Text to append to existing details
+
+        Returns:
+            True if updated, False if not found
+        """
+        cursor = self.conn.cursor()
+
+        # Resolve full ID from prefix
+        cursor.execute("SELECT id, rowid FROM memories WHERE id LIKE ?", (memory_id + "%",))
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        full_id = row["id"]
+
+        # Build SET clauses dynamically
+        from datetime import datetime, timezone
+        sets = ["updated_count = updated_count + 1", "updated_at = ?"]
+        params: list = [datetime.now(timezone.utc).isoformat()]
+
+        if what is not None:
+            sets.append("what = ?")
+            params.append(what)
+        if why is not None:
+            sets.append("why = ?")
+            params.append(why)
+        if impact is not None:
+            sets.append("impact = ?")
+            params.append(impact)
+        if tags is not None:
+            sets.append("tags = ?")
+            params.append(json.dumps(tags))
+
+        params.append(full_id)
+        cursor.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id = ?", params)
+
+        # Handle details append
+        if details_append:
+            cursor.execute("SELECT body FROM memory_details WHERE memory_id = ?", (full_id,))
+            existing = cursor.fetchone()
+            if existing:
+                new_body = existing["body"] + "\n\n" + details_append
+                cursor.execute("UPDATE memory_details SET body = ? WHERE memory_id = ?", (new_body, full_id))
+            else:
+                cursor.execute("INSERT INTO memory_details (memory_id, body) VALUES (?, ?)", (full_id, details_append))
+
+        self.conn.commit()
+        return True
 
     def delete_memory(self, memory_id: str) -> bool:
         """Delete a memory by ID or prefix.
