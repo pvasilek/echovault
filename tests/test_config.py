@@ -7,7 +7,6 @@ import yaml
 
 from memory.config import (
     EmbeddingConfig,
-    EnrichmentConfig,
     MemoryConfig,
     get_memory_home,
     load_config,
@@ -23,11 +22,6 @@ def test_default_config_has_correct_defaults():
     assert config.embedding.base_url == "http://localhost:11434"
     assert config.embedding.api_key is None
 
-    assert config.enrichment.provider == "none"
-    assert config.enrichment.model is None
-    assert config.enrichment.base_url is None
-    assert config.enrichment.api_key is None
-
 
 def test_load_config_with_all_fields():
     """Test loading config from YAML with all fields populated."""
@@ -37,12 +31,6 @@ def test_load_config_with_all_fields():
             "model": "text-embedding-3-small",
             "base_url": "https://api.openai.com/v1",
             "api_key": "openai-key",
-        },
-        "enrichment": {
-            "provider": "openrouter",
-            "model": "anthropic/claude-3.5-sonnet",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "openrouter-key",
         },
     }
 
@@ -57,11 +45,6 @@ def test_load_config_with_all_fields():
         assert config.embedding.model == "text-embedding-3-small"
         assert config.embedding.base_url == "https://api.openai.com/v1"
         assert config.embedding.api_key == "openai-key"
-
-        assert config.enrichment.provider == "openrouter"
-        assert config.enrichment.model == "anthropic/claude-3.5-sonnet"
-        assert config.enrichment.base_url == "https://openrouter.ai/api/v1"
-        assert config.enrichment.api_key == "openrouter-key"
     finally:
         os.unlink(config_path)
 
@@ -72,7 +55,6 @@ def test_load_config_missing_file_returns_defaults():
 
     assert config.embedding.provider == "ollama"
     assert config.embedding.model == "nomic-embed-text"
-    assert config.enrichment.provider == "none"
 
 
 def test_load_config_partial_fields():
@@ -95,10 +77,6 @@ def test_load_config_partial_fields():
         assert config.embedding.model == "nomic-embed-text"
         assert config.embedding.base_url == "http://localhost:11434"
         assert config.embedding.api_key is None
-
-        # Enrichment should have defaults
-        assert config.enrichment.provider == "none"
-        assert config.enrichment.model is None
     finally:
         os.unlink(config_path)
 
@@ -114,7 +92,6 @@ def test_load_config_empty_file():
 
         assert config.embedding.provider == "ollama"
         assert config.embedding.model == "nomic-embed-text"
-        assert config.enrichment.provider == "none"
     finally:
         os.unlink(config_path)
 
