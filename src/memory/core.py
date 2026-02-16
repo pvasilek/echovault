@@ -20,11 +20,10 @@ from typing import Optional
 from memory.config import get_memory_home, load_config
 from memory.db import DimensionMismatchError, MemoryDB
 from memory.embeddings.base import EmbeddingProvider
-from memory.enrichment.base import EnrichmentProvider, dedupe_tags
 from memory.markdown import write_session_memory
 from memory.models import Memory, MemoryDetail, RawMemoryInput
 from memory.redaction import load_memoryignore, redact
-from memory.search import hybrid_search
+from memory.search import hybrid_search, tiered_search
 
 
 class MemoryService:
@@ -56,7 +55,6 @@ class MemoryService:
 
         # Lazy-load embedding provider (expensive operation)
         self._embedding_provider: Optional[EmbeddingProvider] = None
-        self._enrichment_provider: Optional[EnrichmentProvider] = None
         self._ignore_patterns: Optional[list[str]] = None
         self._vectors_available: Optional[bool] = None
 
@@ -115,58 +113,7 @@ class MemoryService:
                 model=self.config.embedding.model,
                 api_key=self.config.embedding.api_key,
             )
-        elif provider == "openrouter":
-            from memory.embeddings.openrouter import OpenRouterEmbedding
-            return OpenRouterEmbedding(
-                model=self.config.embedding.model,
-                api_key=self.config.embedding.api_key,
-            )
         raise ValueError(f"Unknown embedding provider: {provider}")
-
-    @property
-    def enrichment_provider(self) -> Optional[EnrichmentProvider]:
-        if self._enrichment_provider is None:
-            self._enrichment_provider = self._create_enrichment_provider()
-        return self._enrichment_provider
-
-    def _create_enrichment_provider(self) -> Optional[EnrichmentProvider]:
-        provider = (self.config.enrichment.provider or "none").lower()
-        if provider in {"none", "off", "disabled"}:
-            return None
-        if provider == "ollama":
-            from memory.enrichment.ollama import OllamaEnrichment
-            return OllamaEnrichment(
-                model=self.config.enrichment.model or "llama3.1:8b",
-                base_url=self.config.enrichment.base_url or "http://localhost:11434",
-            )
-        if provider == "openai":
-            from memory.enrichment.openai import OpenAIEnrichment
-            return OpenAIEnrichment(
-                model=self.config.enrichment.model or "gpt-4o-mini",
-                api_key=self.config.enrichment.api_key,
-            )
-        if provider == "openrouter":
-            from memory.enrichment.openrouter import OpenRouterEnrichment
-            return OpenRouterEnrichment(
-                model=self.config.enrichment.model or "openai/gpt-4o-mini",
-                api_key=self.config.enrichment.api_key,
-            )
-        raise ValueError(f"Unknown enrichment provider: {provider}")
-
-    def _build_enrichment_text(self, raw: RawMemoryInput) -> str:
-        parts = [f"Title: {raw.title}", f"What: {raw.what}"]
-        if raw.why:
-            parts.append(f"Why: {raw.why}")
-        if raw.impact:
-            parts.append(f"Impact: {raw.impact}")
-        if raw.details:
-            trimmed = raw.details
-            if len(trimmed) > 2000:
-                trimmed = trimmed[:2000] + "..."
-            parts.append(f"Details: {trimmed}")
-        if raw.related_files:
-            parts.append(f"Files: {', '.join(raw.related_files)}")
-        return "\n".join(parts)
 
     def _merge_tags(self, existing: list[str], extra: list[str]) -> list[str]:
         combined = existing[:]
@@ -197,7 +144,7 @@ class MemoryService:
             return False
 
     def save(
-        self, raw: RawMemoryInput, project: Optional[str] = None, enrich: bool = False
+        self, raw: RawMemoryInput, project: Optional[str] = None
     ) -> dict[str, str]:
         """Save a memory with full pipeline: redact, write markdown, index, embed.
 
@@ -225,27 +172,67 @@ class MemoryService:
         if raw.details:
             raw.details = redact(raw.details, self.ignore_patterns)
 
-        # Optionally enrich tags (after redaction)
-        if enrich:
-            provider = self.enrichment_provider
-            if provider is None:
-                print(
-                    "Warning: enrichment requested but no provider configured.",
-                    file=sys.stderr,
-                )
-            else:
-                try:
-                    text = self._build_enrichment_text(raw)
-                    enriched = provider.extract_tags(text, max_tags=8)
-                    enriched = dedupe_tags(enriched, max_tags=8)
-                    if enriched:
-                        raw.tags = self._merge_tags(raw.tags, enriched)
-                except Exception as e:
-                    print(
-                        f"Warning: enrichment failed ({e}). Memory saved without enrichment.",
-                        file=sys.stderr,
-                    )
+        # --- Dedup check: look for similar existing memory in same project ---
+        dedup_query = f"{raw.title} {raw.what}"
+        try:
+            candidates = self.db.fts_search(dedup_query, limit=5, project=project)
+        except Exception:
+            candidates = []
 
+        if candidates:
+            # Normalize: divide top score by max score across broader search
+            broad = candidates
+            if len(broad) == 1:
+                # Single result — get unfiltered results for normalization
+                try:
+                    broad = self.db.fts_search(dedup_query, limit=5) or broad
+                except Exception:
+                    pass
+            max_score = max(c["score"] for c in broad) if broad else 0.0
+            top = candidates[0]
+            normalized = top["score"] / max_score if max_score > 0 else 0.0
+            # Also require title similarity (case-insensitive)
+            title_match = raw.title.strip().lower() == top["title"].strip().lower()
+            if normalized >= 0.7 and title_match:
+                # Update existing memory instead of creating duplicate
+                existing_id = top["id"]
+                existing_file_path = top.get("file_path", "")
+
+                merged_tags = self._merge_tags(
+                    json.loads(top["tags"]) if isinstance(top["tags"], str) else (top["tags"] or []),
+                    raw.tags,
+                )
+
+                details_append = None
+                if raw.details:
+                    details_append = f"--- updated {today} ---\n{raw.details}"
+
+                self.db.update_memory(
+                    memory_id=existing_id,
+                    what=raw.what,
+                    why=raw.why,
+                    impact=raw.impact,
+                    tags=merged_tags,
+                    details_append=details_append,
+                )
+
+                # Re-embed the updated memory (non-fatal)
+                try:
+                    embed_text = f"{top['title']} {raw.what} {raw.why or ''} {raw.impact or ''} {' '.join(merged_tags)}"
+                    embedding = self.embedding_provider.embed(embed_text)
+                    if self._ensure_vectors(embedding):
+                        # Get rowid for the existing memory
+                        cursor = self.db.conn.cursor()
+                        cursor.execute("SELECT rowid FROM memories WHERE id = ?", (existing_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            self.db.insert_vector(row["rowid"], embedding)
+                except Exception:
+                    pass
+
+                return {"id": existing_id, "file_path": existing_file_path, "action": "updated"}
+
+        # --- Normal save path: create new memory ---
         # Create memory object with generated metadata
         file_path = os.path.join(vault_project_dir, f"{today}-session.md")
         mem = Memory.from_raw(raw, project=project, file_path=file_path)
@@ -276,51 +263,7 @@ class MemoryService:
                 file=sys.stderr,
             )
 
-        return {"id": mem.id, "file_path": file_path}
-
-    def auto_save(
-        self,
-        response: str,
-        project: Optional[str] = None,
-        source: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Auto-save a memory from an agent response using enrichment.
-
-        Uses the configured enrichment provider to decide if the response
-        is worth saving and to extract structured fields.
-
-        Args:
-            response: The agent's response text.
-            project: Optional project name.
-            source: Optional source identifier (e.g. "claude-code").
-
-        Returns:
-            Save result dict with 'id' and 'file_path', or None if skipped.
-        """
-        provider = self.enrichment_provider
-        if provider is None:
-            return None
-
-        try:
-            extracted = provider.extract_memory(response)
-        except Exception:
-            return None
-
-        if extracted is None:
-            return None
-
-        raw = RawMemoryInput(
-            title=extracted["title"],
-            what=extracted["what"],
-            why=extracted.get("why"),
-            impact=extracted.get("impact"),
-            tags=extracted.get("tags", []),
-            category=extracted.get("category"),
-            details=extracted.get("details"),
-            source=source,
-        )
-
-        return self.save(raw, project=project, enrich=False)
+        return {"id": mem.id, "file_path": file_path, "action": "created"}
 
     def search(
         self,
@@ -354,26 +297,24 @@ class MemoryService:
                 source=source,
             )
 
-        # Try hybrid search if vectors are available
+        # Use tiered search: FTS first, embed only if sparse results
         if self.vectors_available:
             try:
-                embedding = self.embedding_provider.embed(query)
-                if self._ensure_vectors(embedding):
-                    return hybrid_search(
-                        self.db,
-                        self.embedding_provider,
-                        query,
-                        limit=limit,
-                        project=project,
-                        source=source,
-                    )
+                return tiered_search(
+                    self.db,
+                    self.embedding_provider,
+                    query,
+                    limit=limit,
+                    project=project,
+                    source=source,
+                )
             except DimensionMismatchError:
                 self._vectors_available = False
             except Exception:
                 pass
 
         # Fallback: FTS-only search
-        return hybrid_search(
+        return tiered_search(
             self.db,
             None,
             query,

@@ -328,6 +328,83 @@ def test_reindex_rebuilds_vectors(env_home):
     service.close()
 
 
+def test_save_dedup_updates_existing_memory(env_home):
+    """Test that saving a similar memory updates the existing one."""
+    service = MemoryService(memory_home=str(env_home))
+
+    raw1 = RawMemoryInput(
+        title="Fixed auth session expiry",
+        what="Session defaulted to 60min instead of 7 days",
+        why="Stytch default param",
+        tags=["auth", "session"],
+        category="bug",
+    )
+    result1 = service.save(raw1, project="test-project")
+
+    raw2 = RawMemoryInput(
+        title="Fixed auth session expiry",
+        what="Both refresh calls now pass 7-day duration",
+        why="Stytch refreshSession had wrong default",
+        impact="Users no longer logged out prematurely",
+        tags=["auth", "stytch"],
+        category="bug",
+    )
+    result2 = service.save(raw2, project="test-project")
+
+    assert result2["action"] == "updated"
+    assert result2["id"] == result1["id"]
+
+    mem = service.db.get_memory(result1["id"])
+    assert mem["what"] == "Both refresh calls now pass 7-day duration"
+    assert mem["updated_count"] == 1
+
+    service.close()
+
+
+def test_save_dedup_does_not_match_different_project(env_home):
+    """Test that dedup only matches within the same project."""
+    service = MemoryService(memory_home=str(env_home))
+
+    raw1 = RawMemoryInput(
+        title="Database migration",
+        what="Added users table",
+        category="decision",
+    )
+    service.save(raw1, project="project-a")
+
+    raw2 = RawMemoryInput(
+        title="Database migration",
+        what="Added users table",
+        category="decision",
+    )
+    result2 = service.save(raw2, project="project-b")
+
+    assert result2["action"] == "created"
+    service.close()
+
+
+def test_save_dedup_creates_new_when_no_match(env_home):
+    """Test that dissimilar memories create new entries."""
+    service = MemoryService(memory_home=str(env_home))
+
+    raw1 = RawMemoryInput(
+        title="Auth session fix",
+        what="Fixed session timeout",
+        category="bug",
+    )
+    service.save(raw1, project="test-project")
+
+    raw2 = RawMemoryInput(
+        title="Database schema redesign",
+        what="Normalized the orders table",
+        category="decision",
+    )
+    result2 = service.save(raw2, project="test-project")
+
+    assert result2["action"] == "created"
+    service.close()
+
+
 def test_dimension_mismatch_falls_back_to_fts(env_home):
     """Test that dimension mismatch triggers FTS-only fallback."""
     from tests.conftest import FakeEmbeddingProvider

@@ -175,6 +175,86 @@ class TestMergeResults:
         assert merged[1]["score"] == pytest.approx(0.5)  # 5/10
         assert merged[2]["score"] == pytest.approx(0.1)  # 1/10
 
+class TestTieredSearch:
+    """Unit tests for tiered_search function."""
+
+    def test_tiered_search_skips_embedding_when_fts_sufficient(self):
+        """Test that tiered search returns FTS results without calling embed."""
+        from unittest.mock import MagicMock
+        from memory.search import tiered_search
+
+        db = MagicMock()
+        db.fts_search.return_value = [
+            {"id": "1", "title": "Auth fix", "score": 5.0},
+            {"id": "2", "title": "Auth setup", "score": 4.0},
+            {"id": "3", "title": "Auth config", "score": 3.0},
+        ]
+
+        embed_provider = MagicMock()
+
+        results = tiered_search(db, embed_provider, "auth", limit=3)
+
+        assert len(results) == 3
+        # Embedding provider should NOT have been called
+        embed_provider.embed.assert_not_called()
+
+    def test_tiered_search_calls_embedding_when_fts_sparse(self):
+        """Test that tiered search falls back to hybrid when FTS returns few results."""
+        from unittest.mock import MagicMock
+        from memory.search import tiered_search
+
+        db = MagicMock()
+        db.fts_search.return_value = [
+            {"id": "1", "title": "Result", "score": 1.0},
+        ]
+        db.vector_search.return_value = [
+            {"id": "2", "title": "Semantic match", "score": 0.9},
+        ]
+
+        embed_provider = MagicMock()
+        embed_provider.embed.return_value = [0.1] * 768
+
+        results = tiered_search(db, embed_provider, "vague query", limit=5)
+
+        # Should have called embedding since FTS was sparse
+        embed_provider.embed.assert_called_once()
+        assert len(results) >= 1
+
+    def test_tiered_search_fts_only_when_no_embed_provider(self):
+        """Test that tiered search works with no embedding provider."""
+        from unittest.mock import MagicMock
+        from memory.search import tiered_search
+
+        db = MagicMock()
+        db.fts_search.return_value = [
+            {"id": "1", "title": "Result", "score": 5.0},
+        ]
+
+        results = tiered_search(db, None, "query", limit=5)
+
+        assert len(results) == 1
+        # Score should be normalized
+        assert results[0]["score"] == 1.0
+
+    def test_tiered_search_falls_back_on_embed_exception(self):
+        """Test that tiered search falls back to FTS on embedding error."""
+        from unittest.mock import MagicMock
+        from memory.search import tiered_search
+
+        db = MagicMock()
+        db.fts_search.return_value = [
+            {"id": "1", "title": "Result", "score": 3.0},
+        ]
+
+        embed_provider = MagicMock()
+        embed_provider.embed.side_effect = RuntimeError("API down")
+
+        results = tiered_search(db, embed_provider, "query", limit=5)
+
+        # Should still return FTS results despite embed failure
+        assert len(results) == 1
+
+
     def test_preserves_result_metadata(self):
         """Should preserve all fields from original results."""
         fts_results = [
