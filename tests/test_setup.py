@@ -23,82 +23,63 @@ def claude_home_with_settings(claude_home):
 
 
 class TestClaudeCodeSetup:
-    def test_creates_settings_file_if_missing(self, claude_home):
+    def test_writes_mcp_server_config(self, claude_home):
         from memory.setup import setup_claude_code
+        setup_claude_code(str(claude_home))
+        settings = json.loads((claude_home / "settings.json").read_text())
+        assert "mcpServers" in settings
+        assert "echovault" in settings["mcpServers"]
+        mcp = settings["mcpServers"]["echovault"]
+        assert mcp["command"] == "memory"
+        assert mcp["args"] == ["mcp"]
 
-        result = setup_claude_code(str(claude_home))
-
-        settings_path = claude_home / "settings.json"
-        assert settings_path.exists()
-        settings = json.loads(settings_path.read_text())
-        assert "hooks" in settings
-        assert "UserPromptSubmit" in settings["hooks"]
-
-    def test_adds_hooks_to_existing_settings(self, claude_home_with_settings):
+    def test_does_not_write_hooks(self, claude_home):
         from memory.setup import setup_claude_code
+        setup_claude_code(str(claude_home))
+        settings = json.loads((claude_home / "settings.json").read_text())
+        assert "hooks" not in settings or "UserPromptSubmit" not in settings.get("hooks", {})
 
-        result = setup_claude_code(str(claude_home_with_settings))
-
-        settings = json.loads((claude_home_with_settings / "settings.json").read_text())
+    def test_preserves_existing_settings(self, claude_home):
+        from memory.setup import setup_claude_code
+        (claude_home / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(memory:*)"]}}, indent=2))
+        setup_claude_code(str(claude_home))
+        settings = json.loads((claude_home / "settings.json").read_text())
         assert settings["permissions"]["allow"] == ["Bash(memory:*)"]
-        assert "UserPromptSubmit" in settings["hooks"]
+        assert "mcpServers" in settings
 
-    def test_installs_user_prompt_submit_hook(self, claude_home):
+    def test_does_not_duplicate_mcp_config(self, claude_home):
         from memory.setup import setup_claude_code
-
         setup_claude_code(str(claude_home))
-
+        setup_claude_code(str(claude_home))
         settings = json.loads((claude_home / "settings.json").read_text())
-        hooks = settings["hooks"]["UserPromptSubmit"]
-        assert len(hooks) == 1
-        assert hooks[0]["hooks"][0]["type"] == "command"
-        assert "memory context" in hooks[0]["hooks"][0]["command"]
+        assert "echovault" in settings["mcpServers"]
 
-    def test_installs_post_tool_use_hook(self, claude_home):
+    def test_removes_old_hooks_on_setup(self, claude_home):
         from memory.setup import setup_claude_code
-
+        old_settings = {
+            "hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "memory context --project"}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "echo | memory auto-save"}]}],
+            }
+        }
+        (claude_home / "settings.json").write_text(json.dumps(old_settings, indent=2))
         setup_claude_code(str(claude_home))
-
         settings = json.loads((claude_home / "settings.json").read_text())
-        hooks = settings["hooks"]["PostToolUse"]
-        assert len(hooks) == 1
-        assert hooks[0]["matcher"] == "Read|Write|Edit"
-        assert hooks[0]["hooks"][0]["type"] == "command"
-        assert "memory auto-save" in hooks[0]["hooks"][0]["command"]
-        assert "$TOOL_INPUT" in hooks[0]["hooks"][0]["command"]
+        assert "hooks" not in settings or "UserPromptSubmit" not in settings.get("hooks", {})
+        assert "mcpServers" in settings
 
-    def test_does_not_duplicate_hooks(self, claude_home):
+    def test_removes_old_skill_on_setup(self, claude_home):
         from memory.setup import setup_claude_code
-
+        skill_dir = claude_home / "skills" / "echovault"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("old skill")
         setup_claude_code(str(claude_home))
-        setup_claude_code(str(claude_home))
-
-        settings = json.loads((claude_home / "settings.json").read_text())
-        hooks = settings["hooks"]["UserPromptSubmit"]
-        memory_hooks = [
-            h for group in hooks for h in group.get("hooks", [])
-            if "memory context" in h.get("command", "")
-        ]
-        assert len(memory_hooks) == 1
-
-    def test_installs_skill_md(self, claude_home):
-        from memory.setup import setup_claude_code
-
-        setup_claude_code(str(claude_home))
-
-        skill_path = claude_home / "skills" / "echovault" / "SKILL.md"
-        assert skill_path.exists()
-        content = skill_path.read_text()
-        assert "EchoVault" in content
-        assert "memory context" in content
+        assert not skill_dir.exists()
 
     def test_returns_success_result(self, claude_home):
         from memory.setup import setup_claude_code
-
         result = setup_claude_code(str(claude_home))
-
         assert result["status"] == "ok"
-        assert "installed" in result["message"].lower() or "already" in result["message"].lower()
 
 
 @pytest.fixture
@@ -125,60 +106,25 @@ def cursor_home_with_hooks(cursor_home):
 
 
 class TestCursorSetup:
-    def test_creates_hooks_file_if_missing(self, cursor_home):
+    def test_writes_mcp_config(self, cursor_home):
         from memory.setup import setup_cursor
-
         setup_cursor(str(cursor_home))
+        mcp_path = cursor_home / "mcp.json"
+        assert mcp_path.exists()
+        data = json.loads(mcp_path.read_text())
+        assert "mcpServers" in data
+        assert "echovault" in data["mcpServers"]
 
-        hooks_path = cursor_home / "hooks.json"
-        assert hooks_path.exists()
-        data = json.loads(hooks_path.read_text())
-        assert data["version"] == 1
-        assert "beforeSubmitPrompt" in data["hooks"]
-
-    def test_adds_hooks_to_existing_config(self, cursor_home_with_hooks):
+    def test_does_not_duplicate(self, cursor_home):
         from memory.setup import setup_cursor
-
-        setup_cursor(str(cursor_home_with_hooks))
-
-        data = json.loads((cursor_home_with_hooks / "hooks.json").read_text())
-        assert "afterFileEdit" in data["hooks"]
-        assert "beforeSubmitPrompt" in data["hooks"]
-
-    def test_installs_before_submit_prompt_hook(self, cursor_home):
-        from memory.setup import setup_cursor
-
-        setup_cursor(str(cursor_home))
-
-        data = json.loads((cursor_home / "hooks.json").read_text())
-        hooks = data["hooks"]["beforeSubmitPrompt"]
-        assert len(hooks) == 1
-        assert "memory context" in hooks[0]["command"]
-
-    def test_does_not_duplicate_hooks(self, cursor_home):
-        from memory.setup import setup_cursor
-
         setup_cursor(str(cursor_home))
         setup_cursor(str(cursor_home))
-
-        data = json.loads((cursor_home / "hooks.json").read_text())
-        hooks = data["hooks"]["beforeSubmitPrompt"]
-        memory_hooks = [h for h in hooks if "memory context" in h.get("command", "")]
-        assert len(memory_hooks) == 1
-
-    def test_installs_skill_md(self, cursor_home):
-        from memory.setup import setup_cursor
-
-        setup_cursor(str(cursor_home))
-
-        skill_path = cursor_home / "skills" / "echovault" / "SKILL.md"
-        assert skill_path.exists()
+        data = json.loads((cursor_home / "mcp.json").read_text())
+        assert "echovault" in data["mcpServers"]
 
     def test_returns_success_result(self, cursor_home):
         from memory.setup import setup_cursor
-
         result = setup_cursor(str(cursor_home))
-
         assert result["status"] == "ok"
 
 
@@ -245,75 +191,43 @@ class TestCodexSetup:
 
 
 class TestUninstall:
-    def test_uninstall_claude_code_removes_hooks(self, claude_home):
+    def test_uninstall_claude_code_removes_mcp_config(self, claude_home):
         from memory.setup import setup_claude_code, uninstall_claude_code
-
         setup_claude_code(str(claude_home))
         uninstall_claude_code(str(claude_home))
-
         settings = json.loads((claude_home / "settings.json").read_text())
-        ups = settings.get("hooks", {}).get("UserPromptSubmit", [])
-        memory_hooks = [
-            h for group in ups for h in group.get("hooks", [])
-            if "memory context" in h.get("command", "")
-        ]
-        assert len(memory_hooks) == 0
+        assert "echovault" not in settings.get("mcpServers", {})
 
-    def test_uninstall_claude_code_preserves_other_hooks(self, claude_home):
-        from memory.setup import setup_claude_code, uninstall_claude_code
-
-        setup_claude_code(str(claude_home))
-        settings = json.loads((claude_home / "settings.json").read_text())
-        settings["hooks"]["PreToolUse"] = [{"hooks": [{"type": "command", "command": "echo hi"}]}]
-        (claude_home / "settings.json").write_text(json.dumps(settings, indent=2))
-
+    def test_uninstall_claude_code_removes_old_hooks(self, claude_home):
+        from memory.setup import uninstall_claude_code
+        old_settings = {
+            "hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "memory context"}]}],
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "echo hi"}]}],
+            }
+        }
+        (claude_home / "settings.json").write_text(json.dumps(old_settings, indent=2))
         uninstall_claude_code(str(claude_home))
-
         settings = json.loads((claude_home / "settings.json").read_text())
-        assert "PreToolUse" in settings["hooks"]
+        assert "UserPromptSubmit" not in settings.get("hooks", {})
+        assert "PreToolUse" in settings.get("hooks", {})
 
-    def test_uninstall_cursor_removes_hooks(self, cursor_home):
+    def test_uninstall_cursor_removes_mcp_config(self, cursor_home):
         from memory.setup import setup_cursor, uninstall_cursor
-
         setup_cursor(str(cursor_home))
         uninstall_cursor(str(cursor_home))
-
-        data = json.loads((cursor_home / "hooks.json").read_text())
-        bsp = data.get("hooks", {}).get("beforeSubmitPrompt", [])
-        memory_hooks = [h for h in bsp if "memory context" in h.get("command", "")]
-        assert len(memory_hooks) == 0
+        data = json.loads((cursor_home / "mcp.json").read_text())
+        assert "echovault" not in data.get("mcpServers", {})
 
     def test_uninstall_codex_removes_section(self, codex_home):
         from memory.setup import setup_codex, uninstall_codex
-
         setup_codex(str(codex_home))
         uninstall_codex(str(codex_home))
-
         content = (codex_home / "AGENTS.md").read_text()
         assert "## EchoVault" not in content
 
-    def test_uninstall_claude_code_removes_skill(self, claude_home):
-        from memory.setup import setup_claude_code, uninstall_claude_code
-
-        setup_claude_code(str(claude_home))
-        assert (claude_home / "skills" / "echovault" / "SKILL.md").exists()
-
-        uninstall_claude_code(str(claude_home))
-        assert not (claude_home / "skills" / "echovault").exists()
-
-    def test_uninstall_codex_removes_skill(self, codex_home):
-        from memory.setup import setup_codex, uninstall_codex
-
-        setup_codex(str(codex_home))
-        assert (codex_home / "skills" / "echovault" / "SKILL.md").exists()
-
-        uninstall_codex(str(codex_home))
-        assert not (codex_home / "skills" / "echovault").exists()
-
     def test_uninstall_noop_when_not_installed(self, claude_home):
         from memory.setup import uninstall_claude_code
-
         (claude_home / "settings.json").write_text("{}")
-
         result = uninstall_claude_code(str(claude_home))
         assert result["status"] == "ok"

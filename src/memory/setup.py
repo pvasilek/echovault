@@ -23,13 +23,39 @@ def _write_json(path: str, data: dict) -> None:
         f.write("\n")
 
 
-def _has_memory_hook(hooks_list: list, command_fragment: str) -> bool:
-    """Check if a hooks list already contains a memory hook."""
-    for group in hooks_list:
-        for hook in group.get("hooks", []):
-            if command_fragment in hook.get("command", ""):
-                return True
-    return False
+MCP_CONFIG = {
+    "command": "memory",
+    "args": ["mcp"],
+    "type": "stdio",
+}
+
+
+def _remove_old_hooks(settings: dict) -> list[str]:
+    """Remove legacy EchoVault hooks from settings. Returns list of removed event names."""
+    hooks = settings.get("hooks", {})
+    removed = []
+    memory_fragments = ("memory context", "memory auto-save")
+
+    for event in list(hooks.keys()):
+        event_hooks = hooks[event]
+        filtered = [
+            group for group in event_hooks
+            if not any(
+                any(frag in h.get("command", "") for frag in memory_fragments)
+                for h in group.get("hooks", [])
+            )
+        ]
+        if len(filtered) != len(event_hooks):
+            removed.append(event)
+            if filtered:
+                hooks[event] = filtered
+            else:
+                del hooks[event]
+
+    if not hooks and "hooks" in settings:
+        del settings["hooks"]
+
+    return removed
 
 
 def _get_skill_md_path() -> str:
@@ -144,7 +170,7 @@ memory save \\
              and anything someone would need to understand this fully later."
 ```
 
-Categories: `decision`, `bug`, `pattern`, `setup`, `learning`, `context`.
+Categories: `decision`, `bug`, `pattern`, `learning`, `context`.
 
 Use `--source` to identify the agent: `claude-code`, `codex`, or `cursor`.
 
@@ -186,126 +212,70 @@ memory delete <id>  # remove a memory
 """
 
 
-CLAUDE_CODE_HOOKS = {
-    "UserPromptSubmit": [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": "memory context --project --query \"$USER_PROMPT\"",
-                    "timeout": 10,
-                }
-            ]
-        }
-    ],
-    "PostToolUse": [
-        {
-            "matcher": "Read|Write|Edit",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": 'echo "$TOOL_INPUT" | memory auto-save --project --source claude-code',
-                    "timeout": 15,
-                }
-            ]
-        }
-    ],
-    "Stop": [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": 'echo "$CLAUDE_RESPONSE" | memory auto-save --project --source claude-code',
-                    "timeout": 15,
-                }
-            ]
-        }
-    ],
-}
-
-
 def setup_claude_code(claude_home: str) -> dict[str, str]:
-    """Install EchoVault hooks into Claude Code settings.
-
-    Args:
-        claude_home: Path to the .claude directory (e.g. ~/.claude).
-
-    Returns:
-        Dict with 'status' and 'message' keys.
-    """
+    """Install EchoVault MCP server into Claude Code settings."""
     settings_path = os.path.join(claude_home, "settings.json")
     settings = _read_json(settings_path)
 
-    hooks = settings.setdefault("hooks", {})
     installed = []
 
-    _HOOK_FRAGMENTS = {
-        "UserPromptSubmit": "memory context",
-        "PostToolUse": "memory auto-save",
-        "Stop": "memory auto-save",
-    }
+    # Remove old hooks if present
+    removed = _remove_old_hooks(settings)
+    if removed:
+        installed.append(f"removed old hooks: {', '.join(removed)}")
 
-    for event, hook_config in CLAUDE_CODE_HOOKS.items():
-        event_hooks = hooks.setdefault(event, [])
-        fragment = _HOOK_FRAGMENTS.get(event, "memory")
-        if not _has_memory_hook(event_hooks, fragment):
-            event_hooks.extend(hook_config)
-            installed.append(event)
+    # Remove old skill if present
+    _uninstall_skill(claude_home)
+
+    # Add MCP server config
+    mcp_servers = settings.setdefault("mcpServers", {})
+    if "echovault" not in mcp_servers:
+        mcp_servers["echovault"] = MCP_CONFIG
+        installed.append("mcpServers")
 
     _write_json(settings_path, settings)
-
-    skill_installed = _install_skill(claude_home)
-    if skill_installed:
-        installed.append("skill")
 
     if installed:
         return {"status": "ok", "message": f"Installed: {', '.join(installed)}"}
     return {"status": "ok", "message": "Already installed"}
 
 
-CURSOR_HOOKS = {
-    "beforeSubmitPrompt": [
-        {
-            "command": "memory context --project --query \"$PROMPT\"",
-            "timeout": 10,
-        }
-    ],
-}
-
-
 def setup_cursor(cursor_home: str) -> dict[str, str]:
-    """Install EchoVault hooks into Cursor hooks.json.
+    """Install EchoVault MCP server into Cursor mcp.json."""
+    mcp_path = os.path.join(cursor_home, "mcp.json")
+    data = _read_json(mcp_path)
 
-    Args:
-        cursor_home: Path to the .cursor directory (e.g. ~/.cursor).
-
-    Returns:
-        Dict with 'status' and 'message' keys.
-    """
-    hooks_path = os.path.join(cursor_home, "hooks.json")
-    data = _read_json(hooks_path)
-
-    data.setdefault("version", 1)
-    hooks = data.setdefault("hooks", {})
     installed = []
 
-    for event, hook_config in CURSOR_HOOKS.items():
-        event_hooks = hooks.setdefault(event, [])
-        has_memory = any("memory context" in h.get("command", "") for h in event_hooks)
-        if not has_memory:
-            event_hooks.extend(hook_config)
-            installed.append(event)
+    # Remove old hooks if present
+    old_hooks_path = os.path.join(cursor_home, "hooks.json")
+    if os.path.exists(old_hooks_path):
+        old_data = _read_json(old_hooks_path)
+        hooks = old_data.get("hooks", {})
+        for event in list(hooks.keys()):
+            event_hooks = hooks[event]
+            filtered = [h for h in event_hooks if "memory context" not in h.get("command", "")]
+            if len(filtered) != len(event_hooks):
+                installed.append(f"removed old hook: {event}")
+                if filtered:
+                    hooks[event] = filtered
+                else:
+                    del hooks[event]
+        _write_json(old_hooks_path, old_data)
 
-    _write_json(hooks_path, data)
+    # Remove old skill if present
+    _uninstall_skill(cursor_home)
 
-    skill_installed = _install_skill(cursor_home)
-    if skill_installed:
-        installed.append("skill")
+    # Add MCP server config
+    mcp_servers = data.setdefault("mcpServers", {})
+    if "echovault" not in mcp_servers:
+        mcp_servers["echovault"] = MCP_CONFIG
+        installed.append("mcpServers")
+
+    _write_json(mcp_path, data)
 
     if installed:
-        msg = f"Installed: {', '.join(installed)}"
-        msg += "\nNote: Auto-persist (Stop hook) is only available for Claude Code. Cursor relies on skill instructions for saving."
-        return {"status": "ok", "message": msg}
+        return {"status": "ok", "message": f"Installed: {', '.join(installed)}"}
     return {"status": "ok", "message": "Already installed"}
 
 
@@ -352,7 +322,7 @@ memory save \\
   --details "Full context. Be thorough."
 ```
 
-Categories: `decision`, `bug`, `pattern`, `setup`, `learning`, `context`.
+Categories: `decision`, `bug`, `pattern`, `learning`, `context`.
 
 ### Rules
 
@@ -401,33 +371,26 @@ def setup_codex(codex_home: str) -> dict[str, str]:
 
 
 def uninstall_claude_code(claude_home: str) -> dict[str, str]:
-    """Remove EchoVault hooks from Claude Code settings."""
+    """Remove EchoVault from Claude Code settings (MCP config + old hooks)."""
     settings_path = os.path.join(claude_home, "settings.json")
     settings = _read_json(settings_path)
 
-    hooks = settings.get("hooks", {})
     removed = []
 
-    memory_fragments = ("memory context", "memory auto-save")
+    # Remove MCP config
+    mcp_servers = settings.get("mcpServers", {})
+    if "echovault" in mcp_servers:
+        del mcp_servers["echovault"]
+        removed.append("mcpServers")
+        if not mcp_servers and "mcpServers" in settings:
+            del settings["mcpServers"]
 
-    for event in list(hooks.keys()):
-        event_hooks = hooks[event]
-        filtered = [
-            group for group in event_hooks
-            if not any(
-                any(frag in h.get("command", "") for frag in memory_fragments)
-                for h in group.get("hooks", [])
-            )
-        ]
-        if len(filtered) != len(event_hooks):
-            removed.append(event)
-            if filtered:
-                hooks[event] = filtered
-            else:
-                del hooks[event]
+    # Remove old hooks
+    old_removed = _remove_old_hooks(settings)
+    removed.extend(old_removed)
 
-    skill_removed = _uninstall_skill(claude_home)
-    if skill_removed:
+    # Remove old skill
+    if _uninstall_skill(claude_home):
         removed.append("skill")
 
     if removed:
@@ -437,29 +400,40 @@ def uninstall_claude_code(claude_home: str) -> dict[str, str]:
 
 
 def uninstall_cursor(cursor_home: str) -> dict[str, str]:
-    """Remove EchoVault hooks from Cursor hooks.json."""
-    hooks_path = os.path.join(cursor_home, "hooks.json")
-    data = _read_json(hooks_path)
+    """Remove EchoVault from Cursor (MCP config + old hooks)."""
+    mcp_path = os.path.join(cursor_home, "mcp.json")
+    data = _read_json(mcp_path)
 
-    hooks = data.get("hooks", {})
     removed = []
 
-    for event in list(hooks.keys()):
-        event_hooks = hooks[event]
-        filtered = [h for h in event_hooks if "memory context" not in h.get("command", "")]
-        if len(filtered) != len(event_hooks):
-            removed.append(event)
-            if filtered:
-                hooks[event] = filtered
-            else:
-                del hooks[event]
+    mcp_servers = data.get("mcpServers", {})
+    if "echovault" in mcp_servers:
+        del mcp_servers["echovault"]
+        removed.append("mcpServers")
+        if not mcp_servers and "mcpServers" in data:
+            del data["mcpServers"]
 
-    skill_removed = _uninstall_skill(cursor_home)
-    if skill_removed:
+    # Remove old hooks
+    old_hooks_path = os.path.join(cursor_home, "hooks.json")
+    if os.path.exists(old_hooks_path):
+        old_data = _read_json(old_hooks_path)
+        hooks = old_data.get("hooks", {})
+        for event in list(hooks.keys()):
+            event_hooks = hooks[event]
+            filtered = [h for h in event_hooks if "memory context" not in h.get("command", "")]
+            if len(filtered) != len(event_hooks):
+                removed.append(event)
+                if filtered:
+                    hooks[event] = filtered
+                else:
+                    del hooks[event]
+        _write_json(old_hooks_path, old_data)
+
+    if _uninstall_skill(cursor_home):
         removed.append("skill")
 
     if removed:
-        _write_json(hooks_path, data)
+        _write_json(mcp_path, data)
         return {"status": "ok", "message": f"Removed: {', '.join(removed)}"}
     return {"status": "ok", "message": "Nothing to remove"}
 
