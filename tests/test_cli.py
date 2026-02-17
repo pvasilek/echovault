@@ -814,8 +814,8 @@ def test_setup_claude_code_project_flag(env_home, tmp_path, monkeypatch):
     result = runner.invoke(main, ["setup", "claude-code", "--project"])
 
     assert result.exit_code == 0
-    settings_path = tmp_path / ".claude" / "settings.json"
-    assert settings_path.exists()
+    mcp_path = tmp_path / ".mcp.json"
+    assert mcp_path.exists()
 
 
 def test_setup_cursor_project_flag(env_home, tmp_path, monkeypatch):

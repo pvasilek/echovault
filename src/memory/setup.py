@@ -213,27 +213,36 @@ memory delete <id>  # remove a memory
 
 
 def setup_claude_code(claude_home: str) -> dict[str, str]:
-    """Install EchoVault MCP server into Claude Code settings."""
-    settings_path = os.path.join(claude_home, "settings.json")
-    settings = _read_json(settings_path)
-
+    """Install EchoVault MCP server into Claude Code .mcp.json."""
     installed = []
 
-    # Remove old hooks if present
-    removed = _remove_old_hooks(settings)
-    if removed:
-        installed.append(f"removed old hooks: {', '.join(removed)}")
+    # Clean old hooks from settings.json if present
+    settings_path = os.path.join(claude_home, "settings.json")
+    if os.path.exists(settings_path):
+        settings = _read_json(settings_path)
+        removed = _remove_old_hooks(settings)
+        if removed:
+            installed.append(f"removed old hooks: {', '.join(removed)}")
+        # Remove mcpServers from settings.json (moved to .mcp.json)
+        if "mcpServers" in settings and "echovault" in settings["mcpServers"]:
+            del settings["mcpServers"]["echovault"]
+            if not settings["mcpServers"]:
+                del settings["mcpServers"]
+            installed.append("migrated mcpServers from settings.json")
+        _write_json(settings_path, settings)
 
     # Remove old skill if present
     _uninstall_skill(claude_home)
 
-    # Add MCP server config
-    mcp_servers = settings.setdefault("mcpServers", {})
+    # Add MCP server config to .mcp.json (project root)
+    project_root = os.path.dirname(claude_home)
+    mcp_path = os.path.join(project_root, ".mcp.json")
+    data = _read_json(mcp_path)
+    mcp_servers = data.setdefault("mcpServers", {})
     if "echovault" not in mcp_servers:
         mcp_servers["echovault"] = MCP_CONFIG
-        installed.append("mcpServers")
-
-    _write_json(settings_path, settings)
+        installed.append("mcpServers in .mcp.json")
+    _write_json(mcp_path, data)
 
     if installed:
         return {"status": "ok", "message": f"Installed: {', '.join(installed)}"}
@@ -371,30 +380,44 @@ def setup_codex(codex_home: str) -> dict[str, str]:
 
 
 def uninstall_claude_code(claude_home: str) -> dict[str, str]:
-    """Remove EchoVault from Claude Code settings (MCP config + old hooks)."""
-    settings_path = os.path.join(claude_home, "settings.json")
-    settings = _read_json(settings_path)
-
+    """Remove EchoVault from Claude Code (.mcp.json + settings.json cleanup)."""
     removed = []
 
-    # Remove MCP config
-    mcp_servers = settings.get("mcpServers", {})
-    if "echovault" in mcp_servers:
-        del mcp_servers["echovault"]
-        removed.append("mcpServers")
-        if not mcp_servers and "mcpServers" in settings:
-            del settings["mcpServers"]
+    # Remove MCP config from .mcp.json
+    project_root = os.path.dirname(claude_home)
+    mcp_path = os.path.join(project_root, ".mcp.json")
+    if os.path.exists(mcp_path):
+        data = _read_json(mcp_path)
+        mcp_servers = data.get("mcpServers", {})
+        if "echovault" in mcp_servers:
+            del mcp_servers["echovault"]
+            removed.append("mcpServers")
+            if not mcp_servers:
+                del data["mcpServers"]
+        if data:
+            _write_json(mcp_path, data)
+        else:
+            os.remove(mcp_path)
 
-    # Remove old hooks
-    old_removed = _remove_old_hooks(settings)
-    removed.extend(old_removed)
+    # Clean old hooks/config from settings.json
+    settings_path = os.path.join(claude_home, "settings.json")
+    if os.path.exists(settings_path):
+        settings = _read_json(settings_path)
+        # Remove legacy mcpServers from settings.json
+        if "mcpServers" in settings and "echovault" in settings["mcpServers"]:
+            del settings["mcpServers"]["echovault"]
+            if not settings["mcpServers"]:
+                del settings["mcpServers"]
+            removed.append("legacy mcpServers from settings.json")
+        old_removed = _remove_old_hooks(settings)
+        removed.extend(old_removed)
+        _write_json(settings_path, settings)
 
     # Remove old skill
     if _uninstall_skill(claude_home):
         removed.append("skill")
 
     if removed:
-        _write_json(settings_path, settings)
         return {"status": "ok", "message": f"Removed: {', '.join(removed)}"}
     return {"status": "ok", "message": "Nothing to remove"}
 
