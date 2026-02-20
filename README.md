@@ -94,6 +94,25 @@ context:
 
 For cloud providers, add `api_key` under the provider section. API keys are redacted in `memory config` output.
 
+### Configure memory location
+
+By default, EchoVault stores data in `~/.memory`.
+
+You can change that in two ways:
+
+- `MEMORY_HOME=/path/to/memory` (highest priority, per-shell/per-process)
+- `memory config set-home /path/to/memory` (persistent default)
+
+Useful commands:
+
+```bash
+memory config set-home /path/to/memory
+memory config clear-home
+memory config
+```
+
+`memory config` now shows both `memory_home` and `memory_home_source` (`env`, `config`, or `default`).
+
 ## Usage
 
 Once set up, your agent uses memory via MCP tools:
@@ -154,13 +173,13 @@ For long details, use `--details-file notes.md`. To scaffold structured details 
 | Codex | `memory setup codex` | MCP server in `.codex/config.toml` + `AGENTS.md` fallback |
 | OpenCode | `memory setup opencode` | MCP server in `opencode.json` (project) or `~/.config/opencode/opencode.json` (global) |
 
-All agents share the same memory vault at `~/.memory/`. A memory saved by Claude Code is searchable from Cursor, Codex, or OpenCode.
+All agents share the same memory vault at your effective `memory_home` path (default `~/.memory/`). A memory saved by Claude Code is searchable from Cursor, Codex, or OpenCode.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `memory init` | Create `~/.memory` vault |
+| `memory init` | Create vault at effective memory home |
 | `memory setup <agent>` | Install MCP server config for an agent |
 | `memory uninstall <agent>` | Remove MCP server config for an agent |
 | `memory save ...` | Save a memory (`--details-file` and `--details-template` supported) |
@@ -171,6 +190,8 @@ All agents share the same memory vault at `~/.memory/`. A memory saved by Claude
 | `memory sessions` | List session files |
 | `memory config` | Show effective config |
 | `memory config init` | Generate a starter config.yaml |
+| `memory config set-home <path>` | Persist default memory location |
+| `memory config clear-home` | Remove persisted memory location |
 | `memory reindex` | Rebuild vectors after changing provider |
 | `memory mcp` | Start the MCP server (stdio transport) |
 
