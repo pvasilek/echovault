@@ -113,6 +113,12 @@ class MemoryService:
                 model=self.config.embedding.model,
                 base_url=self.config.embedding.base_url or "http://localhost:11435",
             )
+        elif provider == "llama-nomic":
+            from memory.embeddings.llama_nomic import LlamaNomicEmbedding
+            return LlamaNomicEmbedding(
+                model=self.config.embedding.model,
+                base_url=self.config.embedding.base_url or "http://localhost:11435",
+            )
         elif provider == "openai":
             from memory.embeddings.openai_embed import OpenAIEmbedding
             return OpenAIEmbedding(
